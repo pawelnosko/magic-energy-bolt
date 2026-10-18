@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Różdżka – strzał energii</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);--bg:#03020a;--ui:rgba(12,10,28,.66);--tx:#ece9ff;--mut:#9d98cc;--ln:rgba(160,150,255,.22);--ac:#46b8ff}
+html{scroll-padding-top:env(safe-area-inset-top,0px);height:100%}
+body{margin:0;height:100%;background:var(--bg);color:var(--tx);font:14px/1.45 "Segoe UI",system-ui,-apple-system,sans-serif;overflow:hidden;touch-action:none;user-select:none;-webkit-user-select:none}
+canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
+.vig{position:fixed;inset:0;pointer-events:none;background:radial-gradient(ellipse at 50% 45%,transparent 55%,rgba(0,0,0,.55))}
+#ui{position:fixed;top:calc(12px + env(safe-area-inset-top,0px));right:12px;width:min(260px,calc(100% - 24px));padding:12px 14px;background:var(--ui);border:1px solid var(--ln);border-radius:12px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+#ui h1{margin:0 0 8px;font-size:15px;font-weight:600;letter-spacing:.02em}
+.seg{display:flex;gap:4px;margin-bottom:10px}
+.seg button{flex:1;padding:7px 4px;border:1px solid var(--ln);border-radius:8px;background:transparent;color:var(--mut);font:inherit;cursor:pointer}
+.seg button.on{color:#fff;border-color:var(--ac);background:rgba(70,184,255,.16)}
+.seg button:focus-visible,input:focus-visible{outline:2px solid var(--ac);outline-offset:2px}
+label{display:flex;justify-content:space-between;align-items:center;gap:10px;color:var(--mut);font-size:13px;margin-top:6px}
+input[type=range]{width:120px;accent-color:var(--ac)}
+#hint{margin:10px 0 0;color:var(--mut);font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="vig"></div>
+<div id="ui">
+  <h1>Strzał z różdżki</h1>
+  <div class="seg" role="group" aria-label="Źródło strzału">
+    <button data-m="point" class="on">Z punktu</button>
+    <button data-m="cursor">Z kursora</button>
+  </div>
+  <label>Poświata <input type="range" id="bl" min="0" max="3" step=".05" value="1.4"></label>
+  <label>Prędkość cząstek <input type="range" id="ps" min=".4" max="2.2" step=".05" value="1"></label>
+  <p id="hint"></p>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/LuminosityHighPassShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/MaskPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
+<script>
+(()=>{
+const TAU=Math.PI*2,R=70,SPEED=85,NS=300,NP=90,NSP=100,MAXB=5,DL=2.6,NC=32;
+const PAL=[[.16,.62,1],[.12,1,.5],[1,.22,.72]]; // błękit, zieleń, róż
+const clamp=(x,a,b)=>x<a?a:x>b?b:x,rnd=(a,b)=>a+Math.random()*(b-a);
+const sm=x=>{x=clamp(x,0,1);return x*x*(3-2*x)};
+const V=THREE.Vector3,DYN=35048;
+const state={mode:'point',pspeed:1};
+
+// ---------- renderer ----------
+const renderer=new THREE.WebGLRenderer({antialias:false,powerPreference:'high-performance'});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2));
+document.body.prepend(renderer.domElement);
+const scene=new THREE.Scene();scene.background=new THREE.Color(0x03020a);
+const camera=new THREE.PerspectiveCamera(60,1,.1,300);camera.position.set(0,0,30);
+let composer=null,bloom=null;
+if(THREE.EffectComposer&&THREE.UnrealBloomPass){
+  composer=new THREE.EffectComposer(renderer);
+  composer.addPass(new THREE.RenderPass(scene,camera));
+  bloom=new THREE.UnrealBloomPass(new THREE.Vector2(256,256),1.4,.7,.08);
+  composer.addPass(bloom);
+}
+
+// ---------- punkty (miękkie, addytywne) ----------
+const ptMat=new THREE.ShaderMaterial({
+  uniforms:{uS:{value:1}},transparent:true,depthWrite:false,blending:THREE.AdditiveBlending,
+  vertexShader:`attribute float aSize;attribute vec3 aColor;varying vec3 vC;uniform float uS;
+  void main(){vC=aColor;vec4 mv=modelViewMatrix*vec4(position,1.);gl_PointSize=aSize*uS/(-mv.z);gl_Position=projectionMatrix*mv;}`,
+  fragmentShader:`varying vec3 vC;void main(){float d=length(gl_PointCoord-.5)*2.;float a=exp(-d*d*3.5)*step(d,1.);gl_FragColor=vec4(vC*a,1.);}`
+});
+function mkPoints(n){
+  const g=new THREE.BufferGeometry(),p=new Float32Array(n*3),c=new Float32Array(n*3),s=new Float32Array(n);
+  g.setAttribute('position',new THREE.BufferAttribute(p,3).setUsage(DYN));
+  g.setAttribute('aColor',new THREE.BufferAttribute(c,3).setUsage(DYN));
+  g.setAttribute('aSize',new THREE.BufferAttribute(s,1).setUsage(DYN));
+  const o=new THREE.Points(g,ptMat);o.frustumCulled=false;
+  return{o,g,p,c,s,flush(){const a=g.attributes;a.position.needsUpdate=a.aColor.needsUpdate=a.aSize.needsUpdate=true}};
+}
+
+// ---------- iskry (żar) ----------
+const EN=600,E=mkPoints(EN),ev=new Float32Array(EN*3),ec=new Float32Array(EN*3),el=new Float32Array(EN),em=new Float32Array(EN);let ei=0;
+function emit(x,y,z,vx,vy,vz,col){
+  const i=ei++%EN;E.p.set([x,y,z],i*3);ev.set([vx,vy,vz],i*3);ec.set(col,i*3);el[i]=em[i]=rnd(.5,1.1);
+}
+function updEmbers(dt){
+  for(let i=0;i<EN;i++){
+    if(el[i]>0){
+      el[i]-=dt;const f=Math.max(0,el[i]/em[i]),k=1-1.8*dt;
+      for(let a=0;a<3;a++){E.p[i*3+a]+=ev[i*3+a]*dt;ev[i*3+a]*=k;E.c[i*3+a]=ec[i*3+a]*f*f}
+      E.s[i]=.05+.2*f;
+    }else{E.c[i*3]=E.c[i*3+1]=E.c[i*3+2]=0;E.s[i]=0}
+  }
+  E.flush();
+}
+scene.add(E.o);
+
+// ---------- strzał ----------
+const H={x:0,y:0,z:0,ph:0,e:0,ux:0,uy:0,uz:0},CL={x:0,y:0,z:0};
+const TB=[1,.5,.22],TS=[1,.75,.5];
+const PR=Array.from({length:3*NP},()=>({z:Math.pow(Math.random(),2.2)*2+.3,v:rnd(.65,1.45),o:Math.random()}));
+class Bolt{
+  constructor(){
+    this.o=new V();this.d=new V(1,0,0);this.e1=new V(0,0,1);this.e2=new V(0,-1,0);
+    this.head=0;this.tail=0;this.held=false;this.active=false;this.age=0;
+    this.cv=new Float32Array(NC*2);this.ct=new Float32Array(NC*2);this.cn=new Float32Array(NC);
+    this.P=mkPoints(NS*3+NP*9+2+NSP*2);
+    const segs=NSP*9+40;
+    this.lp=new Float32Array(segs*6);this.lc=new Float32Array(segs*6);
+    const g=new THREE.BufferGeometry();
+    g.setAttribute('position',new THREE.BufferAttribute(this.lp,3).setUsage(DYN));
+    g.setAttribute('color',new THREE.BufferAttribute(this.lc,3).setUsage(DYN));
+    this.L=new THREE.LineSegments(g,new THREE.LineBasicMaterial({vertexColors:true,transparent:true,blending:THREE.AdditiveBlending,depthWrite:false}));
+    this.L.frustumCulled=false;
+    this.g=new THREE.Group();this.g.add(this.P.o,this.L);this.g.visible=false;scene.add(this.g);
+    this.sp=Array.from({length:NSP},()=>({born:-9,ttl:0,s:0,i:0,len:1,col:0,tick:-1,bi:2,fade:0,on:false,
+      jt:new Float32Array(9),jw:new Float32Array(9),bd:[0,0],tip:[0,0,0]}));
+  }
+  fire(o,d){
+    this.o.copy(o);this.d.copy(d);this.e2.set(d.y,-d.x,0);
+    this.head=.01;this.tail=0;this.held=true;this.age=0;this.active=true;this.g.visible=true;
+    this.sp.forEach(s=>{s.born=-9;s.ttl=0});
+    for(let m=0;m<NC;m++)this.rr(m,true);
+  }
+  // oś strumienia łamie się jak błyskawica: losowe odchylenia w punktach kontrolnych co DL
+  rr(m,now){
+    const A=2*clamp(m/2.5,0,1)*(Math.random()<.2?1.5:1);
+    this.ct[m*2]=m?rnd(-1,1)*A:0;this.ct[m*2+1]=m?rnd(-1,1)*A*.5:0;
+    this.cn[m]=rnd(.1,.3);
+    if(now){this.cv[m*2]=this.ct[m*2];this.cv[m*2+1]=this.ct[m*2+1]}
+  }
+  wob(dt){
+    const k=1-Math.exp(-dt*14),cv=this.cv,ct=this.ct;
+    for(let m=1;m<NC;m++){
+      this.cn[m]-=dt;if(this.cn[m]<=0)this.rr(m,false);
+      cv[m*2]+=(ct[m*2]-cv[m*2])*k;cv[m*2+1]+=(ct[m*2+1]-cv[m*2+1])*k;
+    }
+  }
+  cl(s){
+    const f0=clamp(s/DL,0,NC-1.001),m=Math.floor(f0),f=f0-m,cv=this.cv,o=this.o,d=this.d,e1=this.e1,e2=this.e2;
+    const a=cv[m*2]*(1-f)+cv[m*2+2]*f,z=cv[m*2+1]*(1-f)+cv[m*2+3]*f;
+    CL.x=o.x+d.x*s+e2.x*a+e1.x*z;CL.y=o.y+d.y*s+e2.y*a+e1.y*z;CL.z=o.z+d.z*s+e2.z*a+e1.z*z;
+  }
+  hx(s,i,T,rm){
+    const e=sm((this.head-s)/2.6)*sm((s-this.tail)/3.2);
+    const r=rm*.6*e*(1+.2*Math.sin(s*.45-T*3+i*2.1));
+    const ph=s*.85-T*8+i*TAU/3,cp=Math.cos(ph),sn=Math.sin(ph);
+    const o=this.o,d=this.d,a=this.e1,b=this.e2;
+    H.ux=a.x*cp+b.x*sn;H.uy=a.y*cp+b.y*sn;H.uz=a.z*cp+b.z*sn;
+    this.cl(s);H.x=CL.x+H.ux*r;H.y=CL.y+H.uy*r;H.z=CL.z+H.uz*r;
+    H.ph=ph;H.e=e;
+  }
+  update(dt,T){
+    if(!this.active)return;
+    this.age+=dt;this.wob(dt);
+    this.head=Math.min(R,this.head+SPEED*dt);
+    if(!this.held&&this.age>.3){
+      this.tail=Math.min(this.head,this.tail+SPEED*1.35*dt);
+      if(this.head-this.tail<.05){this.active=false;this.g.visible=false;return}
+    }
+    const{head,tail,o,d}=this,Ln=head-tail,P=this.P,p=P.p,c=P.c,sz=P.s;
+    const dens=clamp(Ln/NS/.85*1.3,.2,1);
+    let n=0;
+    const put=(x,y,z,r,g,b,s)=>{const q=n*3;p[q]=x;p[q+1]=y;p[q+2]=z;c[q]=r;c[q+1]=g;c[q+2]=b;sz[n++]=s};
+
+    // trzy splecione nici
+    for(let i=0;i<3;i++){
+      const A=PAL[i],B=PAL[(i+1)%3];
+      for(let k=0;k<NS;k++){
+        const s=tail+k/(NS-1)*Ln;this.hx(s,i,T,.8);
+        const m=.4*(.5+.5*Math.sin(s*.5-T*3)),br=.5*dens*(.5+.5*H.e);
+        put(H.x,H.y,H.z,(A[0]+(B[0]-A[0])*m)*br,(A[1]+(B[1]-A[1])*m)*br,(A[2]+(B[2]-A[2])*m)*br,.85*(.35+.65*H.e));
+      }
+    }
+    // szybkie cząsteczki z ogonkami
+    const pv=130*state.pspeed;
+    for(let i=0;i<3;i++){
+      const A=PAL[i];
+      for(let k=0;k<NP;k++){
+        const q=PR[i*NP+k],u=(q.o+T*pv*q.v/Math.max(Ln,8))%1,s0=tail+u*Ln;
+        for(let t=0;t<3;t++){
+          const s=s0-t*.55;
+          if(s<tail+.3){put(0,0,0,0,0,0,0);continue}
+          this.hx(s,i,T,.8);
+          const br=1.5*TB[t]*(.3+.7*H.e);
+          put(H.x,H.y,H.z,(A[0]*.5+.5)*br,(A[1]*.5+.5)*br,(A[2]*.5+.5)*br,.75*q.z*(.4+.6*H.e)*TS[t]);
+        }
+      }
+    }
+    // rozbłyski: początek i czoło
+    const og=tail<.5?1:Math.max(0,1-tail/6);
+    this.cl(tail);put(CL.x,CL.y,CL.z,.55*og,.8*og,1*og,2.6*(.85+.15*Math.sin(T*47))*og+.001);
+    const hh=(T*1.3)%3,hi=Math.floor(hh),hm=hh-hi,HA=PAL[hi],HB=PAL[(hi+1)%3],hv=head<R?1:0;
+    this.cl(head);put(CL.x,CL.y,CL.z,((HA[0]+(HB[0]-HA[0])*hm)*.8+.3)*hv,((HA[1]+(HB[1]-HA[1])*hm)*.8+.3)*hv,((HA[2]+(HB[2]-HA[2])*hm)*.8+.3)*hv,1.9*(.85+.15*Math.sin(T*61))*hv+.001);
+
+    // piorunki – sieć neuronowa
+    const lp=this.lp,lc=this.lc;
+    const seg=(idx,ax,ay,az,bx,by,bz,r,g,b,k2)=>{const q=idx*6;lp[q]=ax;lp[q+1]=ay;lp[q+2]=az;lp[q+3]=bx;lp[q+4]=by;lp[q+5]=bz;lc[q]=r;lc[q+1]=g;lc[q+2]=b;lc[q+3]=r*k2;lc[q+4]=g*k2;lc[q+5]=b*k2};
+    const clr=idx=>{lp.fill(0,idx*6,idx*6+6);lc.fill(0,idx*6,idx*6+6)};
+    for(let j=0;j<NSP;j++){
+      const sp=this.sp[j];let age=T-sp.born;
+      if(age>sp.ttl){
+        if(Ln>4){
+          sp.s=rnd(tail+1.2,head-1.2);sp.i=Math.floor(rnd(0,3));sp.len=rnd(.7,1.8);sp.col=Math.floor(rnd(0,3));
+          sp.bi=2+Math.floor(rnd(0,2));sp.bd=[rnd(-1,1),rnd(-1,1)];sp.born=T+rnd(0,.2);sp.ttl=rnd(.15,.4);
+        }else{sp.born=T+.1;sp.ttl=.1}
+        age=T-sp.born;
+      }
+      if(age<0||sp.s<tail+.5||sp.s>head-.5){
+        if(sp.s<tail+.5)sp.ttl=0;
+        for(let m=0;m<8;m++)clr(j*8+m);
+        put(0,0,0,0,0,0,0);put(0,0,0,0,0,0,0);sp.on=false;continue;
+      }
+      const tick=Math.floor(T*20)+j;
+      if(tick!==sp.tick){sp.tick=tick;for(let m=0;m<9;m++){sp.jt[m]=rnd(-1,1);sp.jw[m]=rnd(-1,1)}}
+      this.hx(sp.s,sp.i,T,.8);
+      const ax=H.x,ay=H.y,az=H.z,ux=H.ux,uy=H.uy,uz=H.uz,dx=d.x,dy=d.y,dz=d.z;
+      const wx=uy*dz-uz*dy,wy=uz*dx-ux*dz,wz=ux*dy-uy*dx;
+      const g=sm(age/.07),fade=(1-(age/sp.ttl)**2)*(.7+.3*Math.random()),col=PAL[sp.col],len=sp.len*g,jj=len*.13;
+      let px=ax,py=ay,pz=az,bx=0,by=0,bz=0;
+      for(let k=1;k<=5;k++){
+        const r=len*k/5,jt=sp.jt[k]*jj,jw=sp.jw[k]*jj;
+        const cx=ax+ux*r+dx*jt+wx*jw,cy=ay+uy*r+dy*jt+wy*jw,cz=az+uz*r+dz*jt+wz*jw;
+        seg(j*8+k-1,px,py,pz,cx,cy,cz,col[0]*fade*1.1,col[1]*fade*1.1,col[2]*fade*1.1,.85);
+        if(k===sp.bi){bx=cx;by=cy;bz=cz}
+        px=cx;py=cy;pz=cz;
+      }
+      sp.tip=[px,py,pz];sp.on=true;sp.fade=fade;
+      put(px,py,pz,(col[0]*.6+.5)*fade,(col[1]*.6+.5)*fade,(col[2]*.6+.5)*fade,.34*g+.001);
+      // odnoga
+      const kx=ux*.5+dx*sp.bd[0]+wx*sp.bd[1],ky=uy*.5+dy*sp.bd[0]+wy*sp.bd[1],kz=uz*.5+dz*sp.bd[0]+wz*sp.bd[1];
+      const st=len*.16;
+      for(let m=1;m<=3;m++){
+        const cx=bx+kx*st+(dx*sp.jt[5+m]+wx*sp.jw[5+m])*len*.07,cy=by+ky*st+(dy*sp.jt[5+m]+wy*sp.jw[5+m])*len*.07,cz=bz+kz*st+(dz*sp.jt[5+m]+wz*sp.jw[5+m])*len*.07;
+        seg(j*8+4+m,bx,by,bz,cx,cy,cz,col[0]*fade*.9,col[1]*fade*.9,col[2]*fade*.9,.7);
+        bx=cx;by=cy;bz=cz;
+      }
+      put(bx,by,bz,col[0]*fade*1.1,col[1]*fade*1.1,col[2]*fade*1.1,.26*g+.001);
+    }
+    // połączenia między końcówkami (neurony)
+    for(let j=0;j<NSP;j++){
+      const a=this.sp[j];let best=-1,bd2=3.6;
+      if(a.on)for(let k=0;k<NSP;k++){
+        if(k===j||!this.sp[k].on)continue;
+        const b=this.sp[k].tip,x=a.tip[0]-b[0],y=a.tip[1]-b[1],z=a.tip[2]-b[2],d2=x*x+y*y+z*z;
+        if(d2<bd2){bd2=d2;best=k}
+      }
+      if(best>=0){const b=this.sp[best].tip,col=PAL[a.sp_col===undefined?this.sp[j].col:0],f=a.fade*.7;
+        seg(NSP*8+j,a.tip[0],a.tip[1],a.tip[2],b[0],b[1],b[2],col[0]*f,col[1]*f,col[2]*f,1)}
+      else clr(NSP*8+j);
+    }
+    {let ps=tail;this.cl(ps);let qx=CL.x,qy=CL.y,qz=CL.z;
+    for(let q=0;q<40;q++){
+      const idx=NSP*9+q;
+      if(ps>=head-1e-4){clr(idx);continue}
+      const ns=Math.min(head,(Math.floor(ps/DL+1e-4)+1)*DL);this.cl(ns);
+      seg(idx,qx,qy,qz,CL.x,CL.y,CL.z,.4,.4,.46,1);qx=CL.x;qy=CL.y;qz=CL.z;ps=ns;
+    }}
+
+    // żar
+    for(let q=0;q<6&&Ln>3;q++){
+      const s=rnd(tail+1,head-.5),i=Math.floor(rnd(0,3));this.hx(s,i,T,.8);
+      const A=PAL[i],v=rnd(1,4);
+      emit(H.x,H.y,H.z,H.ux*v+rnd(-1,1)+d.x*rnd(-1,3),H.uy*v+rnd(-1,1)+d.y*rnd(-1,3),H.uz*v+rnd(-1,1),[A[0]*1.2,A[1]*1.2,A[2]*1.2]);
+    }
+    P.flush();
+    const la=this.L.geometry.attributes;la.position.needsUpdate=la.color.needsUpdate=true;
+  }
+}
+const bolts=Array.from({length:MAXB},()=>new Bolt());
+
+// ---------- znacznik celu ----------
+const M=mkPoints(4);scene.add(M.o);
+const origin=new V(),tmp=new V();
+function toWorld(cx,cy,out){
+  out.set(cx/innerWidth*2-1,-(cy/innerHeight*2-1),.5).unproject(camera);
+  out.sub(camera.position).normalize();
+  return out.multiplyScalar(-camera.position.z/out.z).add(camera.position);
+}
+
+// ---------- wejście ----------
+const ptr={x:innerWidth/2,y:innerHeight/2,dx:1,dy:0};let cur=null;
+const ui=document.getElementById('ui');
+addEventListener('pointermove',e=>{
+  const mx=e.clientX-ptr.x,my=e.clientY-ptr.y,m=Math.hypot(mx,my);
+  if(m>2){const l=.35;ptr.dx+=(mx/m-ptr.dx)*l;ptr.dy+=(my/m-ptr.dy)*l;const k=Math.hypot(ptr.dx,ptr.dy)||1;ptr.dx/=k;ptr.dy/=k}
+  ptr.x=e.clientX;ptr.y=e.clientY;
+});
+function aim(){
+  const w=toWorld(ptr.x,ptr.y,new V()),d=new V(),o=new V();
+  if(state.mode==='point'){o.copy(origin);d.subVectors(w,o);d.z=0;if(d.length()<.5)d.set(1,0,0)}
+  else{o.copy(w);d.set(ptr.dx,-ptr.dy,0)}
+  return{o,d:d.normalize()};
+}
+addEventListener('pointerdown',e=>{
+  if(e.target.closest('#ui'))return;
+  ptr.x=e.clientX;ptr.y=e.clientY;
+  const{o,d}=aim();
+  let b=bolts.find(x=>!x.active)||bolts.reduce((a,x)=>x.age>a.age?x:a);
+  b.fire(o,d);cur=b;
+});
+const rel=()=>{if(cur){cur.held=false;cur=null}};
+addEventListener('pointerup',rel);addEventListener('pointercancel',rel);
+addEventListener('contextmenu',e=>e.preventDefault());
+
+// ---------- UI ----------
+const hint=document.getElementById('hint');
+const hints={point:'Kliknij – strzał leci z punktu w lewym dolnym rogu w stronę kursora. Przytrzymaj, by utrzymać strumień.',
+  cursor:'Kliknij – strzał wylatuje z kursora w kierunku ostatniego ruchu myszy (kropki pokazują cel).'};
+hint.textContent=hints.point;
+document.querySelectorAll('.seg button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('.seg button').forEach(x=>x.classList.toggle('on',x===b));
+  state.mode=b.dataset.m;hint.textContent=hints[state.mode];
+});
+document.getElementById('bl').oninput=e=>{if(bloom)bloom.strength=+e.target.value};
+document.getElementById('ps').oninput=e=>{state.pspeed=+e.target.value};
+
+// ---------- rozmiar i pętla ----------
+function resize(){
+  const w=innerWidth,h=innerHeight;
+  renderer.setSize(w,h);camera.aspect=w/h;camera.updateProjectionMatrix();camera.updateMatrixWorld();
+  if(composer)composer.setSize(w,h);
+  const b=renderer.getDrawingBufferSize(new THREE.Vector2());
+  ptMat.uniforms.uS.value=b.y/(2*Math.tan(camera.fov*Math.PI/360));
+  origin.copy(toWorld(w*.1,h*.78,tmp));
+}
+addEventListener('resize',resize);resize();
+
+let last=performance.now(),T=0,shake=0;
+function frame(now){
+  const dt=Math.min(.05,(now-last)/1000);last=now;T+=dt;
+  bolts.forEach(b=>b.update(dt,T));
+  updEmbers(dt);
+  // celownik
+  const a=aim(),pulse=.85+.15*Math.sin(T*3);
+  const bp=state.mode==='point'?a.o:a.o;
+  M.p.set([bp.x,bp.y,bp.z],0);M.c.set([.35*pulse,.65*pulse,.9*pulse],0);M.s[0]=.55*pulse;
+  for(let k=1;k<4;k++){
+    M.p.set([bp.x+a.d.x*1.5*k,bp.y+a.d.y*1.5*k,0],k*3);
+    const f=.5/k;M.c.set([.5*f,.6*f,.9*f],k*3);M.s[k]=.2;
+  }
+  M.flush();
+  const any=bolts.some(b=>b.active&&b.held);
+  shake+=((any?1:0)-shake)*Math.min(1,dt*10);
+  scene.position.set((Math.random()-.5)*.1*shake,(Math.random()-.5)*.1*shake,0);
+  if(composer)composer.render();else renderer.render(scene,camera);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
