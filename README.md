@@ -84,7 +84,7 @@ do wyczyszczenia
 <p>I wanted the energy to feel alive: twisting, pulsing, branching, and constantly changing its shape.</p>
 <p>The result is an interactive energy bolt inspired by magical spells, plasma streams, and science-fiction visual effects.</p>
 <p> </p>
-<p><strong><a href="https://pawelnosko.com/images/blog/wand.webp">View Project Preview</a></strong></p>
+<p><strong><a href="https://pawelnosko.com/js-frontend-tools/how-i-created-a-magical-energy-bolt-in-three-js-triple-helix-particles-and-webgl-lightning">View Project Preview</a></strong></p>
 <h2>✨ Features</h2>
 <h3>Triple-Helix Energy Stream</h3>
 <p>The main beam consists of three intertwined particle streams, each with its own color and rotational phase.</p>
@@ -334,7 +334,7 @@ do wyczyszczenia
 <p><a href="https://www.designcart.pl/">Design Cart — Official Website</a></p>
 </li>
 <li>
-<p><a href="https://pawelnosko.com/images/blog/wand.webp">Project Preview</a></p>
+<p><a href="https://pawelnosko.com/js-frontend-tools/how-i-created-a-magical-energy-bolt-in-three-js-triple-helix-particles-and-webgl-lightning">Project Preview</a></p>
 </li>
 </ul>
 <h2>⭐ Support the Project</h2>
